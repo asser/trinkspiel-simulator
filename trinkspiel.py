@@ -17,7 +17,7 @@ class Player(object):
         self.sex = sex
         self.ALL_PLAYERS.append(self)
         self.last_roll = None
-        self.skip_next_turn = False
+        self._skip_next_turn = False
 
     @classmethod
     def randomize(cls, name, sex):
@@ -32,7 +32,52 @@ class Player(object):
 
     @classmethod
     def all_players(cls):
-        return cls.ALL_PLAYERS
+        return cls.ALL_PLAYERS.copy()
+
+    def random_players(self, num_players=1, only_sex=None, include_self=False):
+        """Return num_players random players"""
+        players = self.all_players()
+
+        if include_self is False:
+            all_len = len(self.ALL_PLAYERS)
+            players.remove(self)
+            if len(self.ALL_PLAYERS) != all_len:
+                raise ValueError('oooops...')
+
+        if only_sex:
+            players = [p for p in players if p.sex == only_sex]
+
+        return players
+
+    def players_ahead(self):
+        """Returns all players ahead of this player"""
+        players = self.all_players()
+
+        return [p for p in players if p.board_position > self.board_position]
+
+    def players_behind(self):
+        """Returns all players behind this player"""
+        players = self.all_players()
+
+        return [p for p in players if p.board_position < self.board_position]
+
+    def players_closest_start_goal(self):
+        all_players = self.all_players()
+        p1 = all_players[0]
+
+        min_pos = max_pos = p1.board_position
+        min_players = [p1]
+        max_players = [p1]
+
+        for p in all_players[1:]:
+            if p.board_position <= min_pos:
+                min_players = [p] if p.board_position == min_pos else min_players + [p]
+                min_pos = p.board_position
+            if p.board_position >= max_pos:
+                max_players = [p] if p.board_position == max_pos else max_players + [p]
+                max_pos = p.board_position
+
+        return min_players + max_players
 
     def left_neighbor(self):
         return self.ALL_PLAYERS[self.player_position-1]
@@ -41,6 +86,11 @@ class Player(object):
         return self.ALL_PLAYERS[(self.player_position+1) % len(self.ALL_PLAYERS)]
 
     def take_turn(self):
+        if self._skip_next_turn:
+            self._skip_next_turn = False
+            print("%s skipped this turn")
+            return
+
         # Roll the dice
         roll = self.last_roll = random.randint(1, 6)
         print("%s rolled a %s" % (self, roll))
@@ -65,7 +115,7 @@ class Player(object):
         self.apply_tile_effect()
 
     def skip_next_turn(self):
-        self.skip_next_turn = True
+        self._skip_next_turn = True
 
     def apply_tile_effect(self):
         tile = BOARD[self.board_position]
@@ -90,7 +140,7 @@ class Tile(object):
     def apply_effects(self, player):
         if callable(self.sips):
             # Sips depends on what the player rolled
-            player.drink(self.sips(player.last_roll()))
+            player.drink(self.sips(player.last_roll))
         elif self.sips > 0:
             player.drink(self.sips)
         if self.change_pos_rel:
@@ -141,30 +191,13 @@ class EverybodyEffectTile(Tile):
         self.max_age = kwargs.pop('max_age', None)
         self.has_glasses = kwargs.pop('has_glasses', None)
         self.wears_jeans = kwargs.pop('wears_jeans', None)
+        self.roll_exact = kwargs.pop('roll_exact', None)
         return super(EverybodyEffectTile, self).__init__(*args, **kwargs)
-
-    def players_closest_start_goal(self, player):
-        all_players = player.all_players()
-        p1 = all_players[0]
-
-        min_pos = max_pos = p1.board_position
-        min_players = [p1]
-        max_players = [p1]
-
-        for p in all_players[1:]:
-            if p.board_position <= min_pos:
-                min_players = [p] if p.board_position == min_pos else min_players + [p]
-                min_pos = p.board_position
-            if p.board_position >= max_pos:
-                max_players = [p] if p.board_position == max_pos else max_players + [p]
-                max_pos = p.board_position
-
-        return min_players + max_players
 
     def apply_effects(self, player):
         # Apply effects to all players instead of the given one
         if self.closest_start_goal:
-            apply_to = self.players_closest_start_goal()
+            apply_to = player.players_closest_start_goal()
         else:
             apply_to = player.all_players()
 
@@ -172,6 +205,8 @@ class EverybodyEffectTile(Tile):
             apply_to.remove(player)
 
         for p in apply_to:
+            if self.roll_exact and random.randint(1, 6) != self.roll_exact:
+                continue
             super(EverybodyEffectTile, self).apply_effects(p)
 
 
@@ -182,7 +217,7 @@ class SingTile(EverybodyEffectTile):
 class SkipNextTurnTile(Tile):
     """Skips the next turn for this player"""
     def apply_effects(self, player):
-        super(SkipNextTurnTile).apply_effects(player)
+        super(SkipNextTurnTile, self).apply_effects(player)
         player.skip_next_turn()
 
 
@@ -198,17 +233,78 @@ class FixmeTile(Tile):
         raise NotImplementedError("Tile '%s' is not yet implemented" % (self.name))
 
 
-class ChoiceTile(FixmeTile):
-    """Tile that applies its effects to everybody"""
+class ChoiceTile(Tile):
+    """Tile that applies its effects to one or more players of the current player's choice"""
     def __init__(self, *args, **kwargs):
         self.num_players = kwargs.pop('num_players')
         self.only_sex = kwargs.pop('only_sex', None)
+        self.include_self = kwargs.pop('include_self', False)
+        self.change_pos_abs = kwargs.pop('change_pos_abs', None)
+        self.sips = kwargs.pop('sips', 1)
         super(ChoiceTile, self).__init__(*args, **kwargs)
+
+    def apply_effects(self, player):
+        apply_to = player.random_players(self.num_players, only_sex=self.only_sex)
+
+        if self.include_self:
+            apply_to.append(player)
+
+        for p in apply_to:
+            p.drink(sips=self.sips)
+
+            if self.change_pos_abs:
+                p.move(abs=self.change_pos_abs)
+
+
+class PositionTile(Tile):
+    """Tile that applies its effects to players in a certain position on the board"""
+    def __init__(self, *args, **kwargs):
+        self.pos_exact = kwargs.pop('pos_exact', None)
+        self.pos_max = kwargs.pop('pos_max', None)
+        self.pos_behind_player = kwargs.pop('pos_behind_player', None)
+        self.pos_ahead_player = kwargs.pop('pos_ahead_player', None)
+        self.pos_closest = kwargs.pop('pos_closest', None)
+        self.sips = kwargs.pop('sips', None)
+        self.change_pos_abs = kwargs.pop('change_pos_abs', None)
+
+    def get_players_closest(self, player, pos):
+        if pos != 0:
+            raise NotImplementedError
+
+        all_players = player.all_players()
+        p1 = all_players[0]
+
+        min_pos = p1.board_position
+        min_players = [p1]
+
+        for p in all_players[1:]:
+            if p.board_position <= min_pos:
+                min_players = [p] if p.board_position == min_pos else min_players + [p]
+                min_pos = p.board_position
+
+        return min_players
+
+    def apply_effects(self, player):
+        if self.pos_closest:
+            apply_to = self.get_players_closest(player, self.pos_closest)
+        elif self.pos_behind_player:
+            apply_to = player.players_behind()
+        elif self.pos_ahead_player:
+            apply_to = player.players_ahead()
+        else:
+            raise NotImplementedError("Not implemented for tile %s" % (self))
+
+        for p in apply_to:
+            if self.sips:
+                p.drink(self.sips)
+            if self.change_pos_abs:
+                p.move(abs=self.change_pos_abs)
 
 
 class WinTile(NoOpTile):
     def apply_effects(self, player):
         raise NotImplementedError("Invalid condition - %s appears to have won." % (player))
+
 
 BOARD = [
     NoOpTile('START'),
@@ -227,7 +323,7 @@ BOARD = [
     Tile('13', change_pos_abs=0, sips=lambda d: d),
     EverybodyEffectTile('14', closest_start_goal=True, sips=1),
     ChoiceTile('15', num_players=1, only_sex='F', sips=1),
-    FixmeTile('16'),  # FIXME: Player and first to laugh drinks
+    ChoiceTile('16', num_players=1, include_self=True, sips=1),
     SkipNextTurnTile('17', sips=1),
     NoOpTile('18'),
     EverybodyEffectTile('19', only_sex='F', sips=1),
@@ -247,13 +343,13 @@ BOARD = [
     Tile('33', sips=1, lose_clothing=True),
     ChoiceTile('34', num_players=1, change_pos_abs=6),
     Tile('35', change_pos_abs=6),
-    FixmeTile('36'),  # FIXME: closest to start drinks and goes there
-    FixmeTile('37'),  # FIXME: everybody in front of player drink
+    PositionTile('36', pos_closest=0, sips=1, change_pos_abs=0),
+    PositionTile('37', pos_ahead_player=True, sips=1),
     NoOpTile('38'),
     Tile('39', sips=1, lose_clothing=True),
     Tile('40', sips=lambda d: d),
     FixmeTile('41'),  # FIXME: 41 - Player(s) with least coins drink
-    FixmeTile('42'),  # FIXME: 42 - Roll the dice, everybody rolling 1 drinks
+    EverybodyEffectTile('42', roll_exact=1, sips=1),
     EverybodyEffectTile('43', has_siblings='S', sips=1),
     FixmeTile('44'),  # FIXME: 44 - Drink and left neighbor decides who drinks
     Tile('45', sips=1, change_pos_rel=2),
